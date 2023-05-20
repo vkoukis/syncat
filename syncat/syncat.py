@@ -31,6 +31,7 @@ import os
 import sys
 import pty
 import pyte
+import types
 import errno
 import fcntl
 import struct
@@ -39,7 +40,13 @@ import termios
 
 # This can't be more than 65535, because the related field
 # in the ioctl to set the PTY window size in the kernel is a short int.
-MAX_LINES = 65535
+#
+# TODO: The tallest Vim window is 1000 lines...
+#       https://vimhelp.org/options.txt.html#%27lines%27
+#       This means we'll have to somehow trigger multiple dumps
+#       to work with files longer than 1000 lines.
+#       This definitely needs a test.
+MAX_LINES = 1000
 
 
 def pty_set_winsize(fd, ws_row, ws_col, ws_xpixel=0, ws_ypixel=0):
@@ -83,25 +90,49 @@ def construct_vim_cmdline(ifname):
     """Construct the vim command line."""
 
     # Test with cat for the time being
-    return ["cat", ifname]
+    # return ["cat", ifname]
 
     # Run Vim
     cl = ["vim"]
     # Set it in readonly mode, so it uses no swapfile, doesn't touch its input
-    cl.extend(["-c", "set readonly"])
+    # also disable all viminfo functionality
+    cl.extend(["-R", "-i", "NONE"])
     # Hide all visual elements, just leave the actual text.
     # This overrides any settings the user may have in their .vimrc,
     # which is great.
-    cl.extend(["-c", "set noshowmode"])
-    cl.extend(["-c", "set noruler"])
-    cl.extend(["-c", "set laststatus=0"])
-    cl.extend(["-c", "set noshowcmd"])
+    cl.extend(["-c", "set noshowmode noruler noshowcmd"])
     # Ask vim to actually edit the input file
     cl.extend([ifname])
     # Ask vim to redraw the screen, which clears everything and ensures
     # the only thing shown on the emulated terminal is the syntax highlighted
-    # text we want to scrape, then quit.
-    cl.extend(["+redraw", "+q"])
+    # text we want to scrape.
+    cl.extend(["+redraw"])
+    # We need a way to know how many lines the final text actually is,
+    # so we can only dump the lines we need.
+    #
+    # Failed approach:
+    # Move to the last line in the file, then exit Vim, so we can retrieve the
+    # position of the emulated cursor when Vim exits and know exactly how many
+    # lines our file was. We can't do this, because Vim will actually move the
+    # cursor to the bottom of the window before exiting.
+    #
+    # Current hack:
+    # Move to the last line, then trigger the "set window title" ANSI escape
+    # sequence, and use the window title as a side channel to pass information
+    # [the current line] to Syncat.
+    # Also see how we monkey patch the relevant method in the Screen object
+    # to run our own callback whenever Vim attempts to set the window title.
+    # TODO: Turn this into a way to work around the 1000-line maximum
+    #       window size, see comment at MAX_LINES, above.
+    cl.extend(["+"])
+    cl.extend(["+silent execute \"!echo -n '\033]0;\".line('.').\"\007'\""])
+    # Finally, just exit Vim.
+    cl.extend(["+q"])
+    # TODO:
+    # Here is a hack: At this point Vim has actually rendered everything,
+    # and we need to snapshot the contents of the emulated terminal,
+    # but the process hasn't terminated yet.
+    # cl.extend(["+q"])
 
     return cl
 
@@ -114,6 +145,61 @@ def _dump_screen(screen):
 
     """
     print("\n".join("*" + row + "*" for row in screen.display))
+
+
+def dump_screen(screen, row_start, row_end):
+    """Dump specific screen lines, including their attributes."""
+    # TODO: Actually dump the attributes of each character as well.
+    sys.stdout.write(("\n".join(row.rstrip()
+                      for row in screen.display[row_start:row_end])) + "\n")
+
+
+def set_window_title_cb(screen, title):
+    """Callback to monkey-patch into Screen.set_title()."""
+
+    # We're passing the actual number of lines via the side channel
+    try:
+        row = int(title)
+    except Exception as e:
+        msg = ("Internal Error: set_window_title_cb: Unexpected title: %s" %
+               title)
+        raise RuntimeError(msg) from e
+
+    dump_screen(screen, 0, row)
+
+
+def pty_fork(child_stdin_fd=None, child_stdout_fd=None, child_stderr_fd=None):
+    """A pty.fork() equivalent which allows arbitrary redirection.
+
+    This function is equivalent to pty.fork() but it doesn't redirect the
+    child's stdin/stdout/stderr to the PTY's slave unconditionally. Instead, it
+    allows arbitrary redirection to any file descriptor that the parent already
+    has open.
+
+    """
+
+    # Create a new PTY, retrieve the file descriptors for its two ends
+    masterfd, slavefd = pty.openpty()
+
+    # Fork!
+    pid = os.fork()
+    if pid == 0:
+        # We're in the child.
+        # Use os.dup2() to redirect stdin/stdout/stderr to the
+        # specified file descriptors, or to the slave fd, otherwise.
+        os.dup2(slavefd if child_stdin_fd is None else child_stdin_fd, 0)
+        os.dup2(slavefd if child_stdout_fd is None else child_stdout_fd, 1)
+        os.dup2(slavefd if child_stderr_fd is None else child_stderr_fd, 2)
+        os.close(slavefd)
+
+        return pid, slavefd
+    elif pid > 0:
+        # We're in the parent, just return
+        os.close(slavefd)
+        return pid, masterfd
+    else:
+        msg = "Internal Error: os.fork() returned pid = %d\n" % pid
+        raise RuntimeError(msg)
 
 
 def main():
@@ -145,14 +231,18 @@ def main():
         cols, rows = os.get_terminal_size()
     except OSError as e:
         if e.errno == errno.ENOTTY:
-            # Stdout is not a tty.
+            # Our stdout is not a tty.
             # Try with stderr instead.
             cols, rows = os.get_terminal_size(sys.stderr.fileno())
         else:
             raise
 
-    # Fork a child process, have it use its own PTY
-    pid, ptyfd = pty.fork()
+    # Fork a child process for Vim, have it use its own PTY
+    # Redirect the child's stdin to our own, presumably a terminal
+    # Redirect the child's stderr to our own, to expose any Vim diagnostics
+    # as our own.
+    pid, ptyfd = pty_fork(child_stdin_fd=sys.stdin.fileno(),
+                          child_stderr_fd=sys.stderr.fileno())
     if pid == 0:
         # Child process:
         # Standard input and output are connected to the new PTY
@@ -170,13 +260,13 @@ def main():
         # Configure the environment, and replace ourselves with Vim.
         # Useful for debugging our terminal state:
         # os.execlp("/bin/stty", "/bin/stty", "size")
-        sys.stderr.write("About to exec: %s\n" % " ".join(cmdline))
+        # sys.stderr.write("About to exec: %s\n" % " ".join(cmdline))
         os.execlp(cmdline[0], *cmdline)
         sys.exit(12)
     elif not pid > 0:
         # This shouldn't have happened, Python should have already
         # thrown an exception.
-        raise RuntimeError("Internal Error: pty.fork() returned pid < 0")
+        raise RuntimeError("Internal Error: pty_fork() returned pid < 0")
 
     # Parent process:
     # We know the PID of the child,
@@ -186,6 +276,15 @@ def main():
     # Use a ByteStream to feed it raw bytes, as retrieved from the kernel.
     screen = pyte.Screen(cols, MAX_LINES)
     stream = pyte.ByteStream(screen)
+
+    # Monkey patch the set_title() method, so we can detect
+    # whenever Vim attempts to update the window title,
+    # and dump the screen.
+    # See here for why we're using types.MethodType:
+    #
+    #      https://tryolabs.com/blog/2013/07/05/run-time-method-patching-python
+    #
+    screen.set_title = types.MethodType(set_window_title_cb, screen)
 
     # TODO: Test performance with byte arrays / memoryviews?
     # buf = byterray(1000)
@@ -233,10 +332,12 @@ def main():
             stream.feed(buf)
 
     # Our work is done.
-    # Dump the final state of the emulated terminal to stdout.
-    # TODO: Actually dump the attributes of each character as well.
+    # We must have already dumped the rendered file,
+    # via the set_window_title_cb() callback, above.
+    #
     # import pdb; pdb.set_trace()
-    sys.stdout.write("\n".join(row.rstrip() for row in screen.display))
+    # sys.stderr.write(("Cursor: [%d, %d]\n" %
+    #                   (screen.cursor.x, screen.cursor.y)))
     return 0
 
 

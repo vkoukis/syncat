@@ -66,8 +66,11 @@ Design principles:
 
 ## Dependencies
 
-Syncat requires a recent version of pyte, it has been tested with python3-pyte
->= 0.8.0-2 on Debian.
+Syncat requires recent versions of the following Python packages:
+
+* `pyte`, it has been tested with python3-pyte>=0.8.0-2 on Debian.
+* `ansi`, it has been tested with python3-ansi>=0.1.5-2 on Debian.
+
 
 ## TODO
 
@@ -80,8 +83,8 @@ Syncat requires a recent version of pyte, it has been tested with python3-pyte
 
 Syncat is inspired by
 
-    * [vimcat/vimpager](https://github.com/rkitover/vimpager), and
-    * [vimkat](https://github.com/nkh/vimkat)
+* [vimcat/vimpager](https://github.com/rkitover/vimpager), and
+* [vimkat](https://github.com/nkh/vimkat)
 
 Nadim Ibn Hamouda El Khemir, author of vimkat, had the idea of using a terminal
 emulator to scrape Vim output.
