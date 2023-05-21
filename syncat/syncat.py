@@ -37,6 +37,7 @@ import fcntl
 import struct
 import termios
 
+from ansi.color import (fg, bg, fx)
 
 # This can't be more than 65535, because the related field
 # in the ioctl to set the PTY window size in the kernel is a short int.
@@ -147,17 +148,84 @@ def _dump_screen(screen):
     print("\n".join("*" + row + "*" for row in screen.display))
 
 
+def _dump_char_full(fh, char):
+    """Dump a single pyte Char will all its attributes.
+
+    Produce all necessary ANSI sequences to dump a pyte Char
+    with all its attributes to the writeable file-like object fh.
+
+    """
+    # TODO: Optimize this, only output ANSI escape sequences for diffs
+    # NOTE: This actually works with less -R! But it *has* to be -R,
+    #       not -r, so less can keep track of where the cursor is,
+    #       and search also works perfectly in this case.
+    msg = []
+    # Moving it at the start, because this actually
+    # destroys fg/bg colors as well.
+    msg.append(fx.reset)
+    try:
+        msg.append(getattr(fg, char.fg))
+    except AttributeError:
+        msg.append(fg.truecolor(int(char.fg[0:2], 16),
+                                int(char.fg[2:4], 16),
+                                int(char.fg[4:6], 16)))
+    try:
+        msg.append(getattr(bg, char.bg))
+    except AttributeError:
+        msg.append(bg.truecolor(int(char.bg[0:2], 16),
+                                int(char.bg[2:4], 16),
+                                int(char.bg[4:6], 16)))
+    msg.append(fx.bold) if char.bold else None
+    msg.append(fx.italic) if char.italics else None
+    msg.append(fx.underscore) if char.underscore else None
+    msg.append(fx.crossed_out) if char.strikethrough else None
+    msg.append(fx.reverse) if char.reverse else None
+    msg.append(char.data)
+    fh.write("".join([str(x) for x in msg]))
+
+
 def dump_screen(screen, row_start, row_end):
     """Dump specific screen lines, including their attributes."""
+
     # TODO: Actually dump the attributes of each character as well.
-    sys.stdout.write(("\n".join(row.rstrip()
-                      for row in screen.display[row_start:row_end])) + "\n")
+
+    # Inspect the attribute of each Char in the emulated terminal
+    # and emit the necessary ANSI sequence to set it.
+    #
+    # See here for pyte-supported attributes:
+    #
+    #     https://github.com/selectel/pyte/blob/master/pyte/screens.py#L70
+    #
+    # See here for ansi-supported attributes:
+    #
+    #     https://github.com/tehmaze/ansi/blob/master/ansi/colour/fx.py
+
+    # TODO: Do we really need sorted(list(...))?
+
+    for rowidx, row in sorted(list(screen.buffer.items()))[row_start:row_end]:
+        curidx = 0
+        for charidx, char in row.items():
+            # row is a sparse line.
+            # So fill in any gaps with the default char,
+            # until we actually reach charidx.
+            for curidx in range(curidx, charidx):
+                _dump_char_full(sys.stdout, screen.default_char)
+            _dump_char_full(sys.stdout, char)
+            curidx += 1
+        # Emit a newline if not at the actual end of the line
+        if curidx != screen.columns - 1:
+            # But make sure not to carry over any active attributes
+            sys.stdout.write(fx.reset + "\n")
+        sys.stdout.flush()
+
+    # sys.stdout.write(("\n".join(row.rstrip()
+    #                   for row in screen.display[row_start:row_end])) + "\n")
 
 
 def set_window_title_cb(screen, title):
     """Callback to monkey-patch into Screen.set_title()."""
-
-    # We're passing the actual number of lines via the side channel
+    # We're passing the actual number of lines via the side channel,
+    # extract it now.
     try:
         row = int(title)
     except Exception as e:
@@ -165,7 +233,15 @@ def set_window_title_cb(screen, title):
                title)
         raise RuntimeError(msg) from e
 
-    dump_screen(screen, 0, row)
+    # However, pyte may invoke this callback not only when we send
+    # the "send window title" from within Vim explicitly, e.g., when
+    # performing a terminal reset. We have pyte invoke this cb multiple
+    # times, detect and ignore them when they happen.
+
+    rowprev = getattr(screen, "syncat_cb_rowprev", 0)
+    if row > rowprev:
+        dump_screen(screen, 0, row)
+        screen.syncat_cb_rowprev = row
 
 
 def pty_fork(child_stdin_fd=None, child_stdout_fd=None, child_stderr_fd=None):
@@ -206,6 +282,10 @@ def main():
     # TODO: Implement Syncat-specific command-line arguments,
     #       parse the command line and isolate them from the rest of the
     #       arguments, pass all other arguments to Vim verbatim.
+    # TODO: Fail if argument doesn't exist [Vim will happily start an
+    #       empty document], fail if argument is not a regular file.
+    # TODO: Pass all command line arguments to Vim
+    # TODO: Implement a verbose mode, set up Python logging
     cmdline = construct_vim_cmdline(sys.argv[1])
 
     # We actually can't retrieve the size of the current terminal
@@ -241,8 +321,14 @@ def main():
     # Redirect the child's stdin to our own, presumably a terminal
     # Redirect the child's stderr to our own, to expose any Vim diagnostics
     # as our own.
-    pid, ptyfd = pty_fork(child_stdin_fd=sys.stdin.fileno(),
-                          child_stderr_fd=sys.stderr.fileno())
+    # TODO: Redirect the child's stderr to a pipe, so we can reports
+    # error independently, without racing with the child Vim
+    # TODO: Confirm reading from a pipe works, redirect Vim's stdin accordingly
+
+    # TODO: Later on:
+    # child_stdin_fd=sys.stdin.fileno()
+    # child_stderr_fd=sys.stderr.fileno())
+    pid, ptyfd = pty_fork()
     if pid == 0:
         # Child process:
         # Standard input and output are connected to the new PTY
@@ -307,8 +393,8 @@ def main():
                 # TODO:
                 # Only in Python 3.9:
                 # sys.exit(os.waitstatus_to_exitcode(wstatus))
-                sys.stderr.write("Child exited. PID: %d, status: %d\n" %
-                                 (wpid, wstatus))
+                # sys.stderr.write("Child exited. PID: %d, status: %d\n" %
+                #                  (wpid, wstatus))
                 # We know the child is dead,
                 # no need to call os.waitpid() for it anymore.
                 child_alive = False
@@ -316,8 +402,7 @@ def main():
         # If someone is still using the slave end of the PTY, retrieve data.
         if not pty_eio:
             try:
-                # TODO: Test performance with much bigger buffer sizes
-                buf = os.read(ptyfd, 1)
+                buf = os.read(ptyfd, 1024)
             except OSError as e:
                 if e.errno == errno.EIO:
                     # This is expected: When the slave end of a PTY has closed,
@@ -338,6 +423,7 @@ def main():
     # import pdb; pdb.set_trace()
     # sys.stderr.write(("Cursor: [%d, %d]\n" %
     #                   (screen.cursor.x, screen.cursor.y)))
+    sys.stderr.flush()
     return 0
 
 
