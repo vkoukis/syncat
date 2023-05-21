@@ -69,12 +69,12 @@ Design principles:
 Syncat requires recent versions of the following Python packages:
 
 * `pyte`: Syncat has been tested with `python3-pyte`>=`0.8.0-2` on Debian.
-   **NOTE**: Any pyte version < `0.8.1` seems to suffer from an issue handling
+   **NOTE:** Any pyte version < `0.8.1` seems to suffer from an issue handling
    bright colors, interpreting them as bold instead.
 
    Syncat runs successfully but you may notice the discrepancy in handling
    bright vs. bold colors compared to running Vim directly on your terminal.
-   Until an updated package lands in Debian, you can install pyte from PyPI, so
+   Until an updated package lands in Debian [report](https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=1036454), you can install pyte from PyPI, so
    it includes the relevant
    [fix](https://github.com/selectel/pyte/commit/4672869d175cea2f80d124f6153fdcc62b53692b).
    For more context see relevant comments
@@ -82,7 +82,11 @@ Syncat requires recent versions of the following Python packages:
    and
    [here](https://github.com/kovidgoyal/kitty/issues/135#issuecomment-433552630).
 
-* `ansi`: Syncat has been tested with python3-ansi>=0.1.5-2 on Debian.
+* `ansi`: Syncat has only been tested with the latest version from PyPI,
+   `0.3.6` as of this writing.
+   **NOTE:** It has been tested to fail with the Debian-packaged version,
+   [report here](https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=1036455),
+   because it doesn't include truecolor support.
 
 
 ## TODO
