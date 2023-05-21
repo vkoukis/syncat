@@ -210,6 +210,7 @@ def dump_screen(screen, row_start, row_end):
             # until we actually reach charidx.
             for curidx in range(curidx, charidx):
                 _dump_char_full(sys.stdout, screen.default_char)
+            curidx = charidx
             _dump_char_full(sys.stdout, char)
             curidx += 1
         # Emit a newline if not at the actual end of the line
