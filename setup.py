@@ -18,7 +18,7 @@ import os
 from setuptools import setup, find_packages
 
 
-INSTALL_REQUIRES = []
+INSTALL_REQUIRES = ["pyte >= 0.8.1", "ansi >= 0.3.6"]
 
 TESTS_REQUIRE = []
 
