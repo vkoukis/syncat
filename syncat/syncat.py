@@ -177,7 +177,7 @@ def _dump_char_full(fh, char):
                                 int(char.bg[4:6], 16)))
     msg.append(fx.bold) if char.bold else None
     msg.append(fx.italic) if char.italics else None
-    msg.append(fx.underscore) if char.underscore else None
+    msg.append(fx.underline) if char.underscore else None
     msg.append(fx.crossed_out) if char.strikethrough else None
     msg.append(fx.reverse) if char.reverse else None
     msg.append(char.data)
